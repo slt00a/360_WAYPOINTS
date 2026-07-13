@@ -1,34 +1,50 @@
 <!--
   ============================================================
-  PARKHILL 360° VIEWER
+  PARKHILL 360° VIEWER  —  waypoints + menu
   ============================================================
   SETUP:
     - Save this file as index.html
-    - Put all panorama .jpg files and the logo .png in the SAME folder
-    - Edit the SCENES list and LOGO below to match your filenames
-    - Upload the folder to your host (GitHub Pages / Netlify) and open the URL
+    - Put all panorama images + logo + favicons in the SAME folder
+    - Upload the folder to your host (GitHub Pages) and open the URL
+    - Must be served over http/https, not opened by double-click.
 
-  Must be opened over http/https (a host or local server),
-  NOT by double-clicking the file, or the images won't load.
+  EACH SCENE:
+    id        short unique name, no spaces (used to link waypoints)
+    label     menu button text
+    file      panorama image filename
+    hotspots  list of waypoints, each: { to:"<id>", lon:<num>, lat:<num> }
+              lon/lat = the 3D direction of the marker, in degrees.
 
-  Only scenes whose image file is actually present will appear in the menu.
+  DON'T KNOW THE lon/lat?  Use the PLACEMENT HELPER:
+    1. Open the page, click "Placement: OFF" (bottom-left) to turn it ON.
+    2. Aim the view at where a waypoint should go and click.
+    3. The readout shows lon/lat and a ready-to-paste snippet — click it to copy.
+    4. Paste into that scene's hotspots list, set "to" to the target id.
+    5. Turn placement mode off when done.
   ============================================================
 -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<title>Parkhill 360°"</title>
+<title>Parkhill 360° Viewer</title>
 <link rel="icon" type="image/webp" href="cropped-favicon-32x32.webp" sizes="32x32" />
 <link rel="icon" type="image/webp" href="cropped-favicon-192x192.webp" sizes="192x192" />
-<link rel="apple-touch-icon" href="cropped-favicon-180x180.png" />
+<link rel="apple-touch-icon" href="cropped-favicon-180x180.webp" />
 
 <script>
   const SCENES = [
-    { label: "Airlines",     file: "AIRLINES.jpg" },
-    { label: "Car Rentals",  file: "RENTALS.jpg" },
-    { label: "West Mezzanine",  file: "MEZZANINE_WEST.jpg" },
-    { label: "East Mezzanine",  file: "MEZZANINE_EAST.jpg" },
-    { label: "Baggage Claim",       file: "BAGGAGE.jpg" },
-    { label: "East Holding",    file: "HOLDING_EAST.jpg" },
-    { label: "Center Holding",    file: "HOLDING_CENTER.jpg" }
+    { id: "airlines",   label: "Airlines",       file: "AIRLINES.jpg",
+      hotspots: [ { to: "rentals", lon: 90, lat: -8 } ] },
+    { id: "rentals",    label: "Car Rentals",    file: "RENTALS.jpg",
+      hotspots: [ { to: "airlines", lon: -90, lat: -8 }, { to: "baggage", lon: 0, lat: -8 } ] },
+    { id: "mezz_west",  label: "West Mezzanine", file: "MEZZANINE_WEST.jpg",
+      hotspots: [ { to: "mezz_east", lon: 90, lat: -8 } ] },
+    { id: "mezz_east",  label: "East Mezzanine", file: "MEZZANINE_EAST.jpg",
+      hotspots: [ { to: "mezz_west", lon: -90, lat: -8 } ] },
+    { id: "baggage",    label: "Baggage Claim",  file: "BAGGAGE.jpg",
+      hotspots: [ { to: "rentals", lon: 180, lat: -8 }, { to: "holding_east", lon: 0, lat: -8 } ] },
+    { id: "holding_east",   label: "East Holding",   file: "HOLDING_EAST.jpg",
+      hotspots: [ { to: "holding_center", lon: 90, lat: -8 } ] },
+    { id: "holding_center", label: "Center Holding", file: "HOLDING_CENTER.jpg",
+      hotspots: [ { to: "holding_east", lon: -90, lat: -8 } ] }
   ];
 
   const LOGO = "1 - Parkhill - Red.png";
@@ -58,6 +74,15 @@
   </div>
   <div id="nav-backdrop"></div>
 
+  <!-- Placement helper (bottom-left, above logo) -->
+  <div id="place-tools">
+    <button id="place-toggle">Placement: OFF</button>
+    <div id="place-readout" class="hidden">
+      <div id="place-coords" title="Click to copy snippet">lon: 0, lat: 0</div>
+      <div id="place-hint">Aim &amp; click in the scene to capture a waypoint.</div>
+    </div>
+  </div>
+
   <!-- Panorama gesture hint (center, fades out on first drag) -->
   <div id="pano-hint" class="hide">
     <div class="pano-hint-inner">
@@ -85,16 +110,22 @@
   const menuBtn = document.getElementById('menu-btn');
   const backdrop = document.getElementById('nav-backdrop');
   const panoHint = document.getElementById('pano-hint');
+  const placeToggle = document.getElementById('place-toggle');
+  const placeReadout = document.getElementById('place-readout');
+  const placeCoords = document.getElementById('place-coords');
   let hintDismissed = false;
+  let placementMode = false;
 
   let scene, camera, renderer, mesh;
   let lon = 0, lat = 0, targetLon = 0, targetLat = 0;
   let fov = 75;
-  let isDragging = false;
+  let isDragging = false, didDrag = false;
   let pointerX = 0, pointerY = 0, downLon = 0, downLat = 0;
   let currentIndex = -1;
   let availableScenes = [];
-  let pinchStartDist = 0, pinchStartFov = 75;   // for two-finger pinch zoom
+  let pinchStartDist = 0, pinchStartFov = 75;
+
+  const byId = {};
 
   function init() {
     scene = new THREE.Scene();
@@ -123,7 +154,6 @@
     checkScenesThenBuild();
   }
 
-  // Verify each scene's image exists (HEAD request — headers only, no download)
   function checkScenesThenBuild() {
     loaderText.textContent = 'Checking scenes…';
     loader.style.display = 'flex';
@@ -139,10 +169,12 @@
       const missing = results.filter(function (r) { return !r.ok; }).map(function (r) { return r.scene.file; });
       if (missing.length) console.warn('Skipped missing images:', missing);
 
+      // index available scenes by id (for hotspot targeting)
+      availableScenes.forEach(function (s, i) { byId[s.id] = i; });
+
       buildSceneList();
 
       if (availableScenes.length) {
-        // If the URL hash names an available scene, open that; else start at 0
         let startIndex = 0;
         const hash = decodeURIComponent((location.hash || '').replace(/^#/, ''));
         if (hash) {
@@ -152,7 +184,7 @@
         loadScene(startIndex);
       } else {
         loader.querySelector('.spinner').style.display = 'none';
-        loaderText.textContent = 'No scene images found. Check that the .jpg files are in the same folder.';
+        loaderText.textContent = 'No scene images found. Check that the image files are in the same folder.';
       }
     });
   }
@@ -186,13 +218,13 @@
 
   function loadScene(i) {
     const s = availableScenes[i];
-    // Remember current scene in the URL hash so a reload returns here
     try { history.replaceState(null, '', '#' + encodeURIComponent(s.file)); } catch (e) {}
     loader.style.display = 'flex';
     loaderText.textContent = 'Loading ' + s.label + '…';
     progressBar.style.width = '0%';
     progressWrap.style.visibility = 'hidden';
     loader.querySelector('.spinner').style.display = '';
+    clearHotspots();
 
     new THREE.TextureLoader().load(
       s.file,
@@ -204,6 +236,7 @@
         loader.style.display = 'none';
         currentIndex = i;
         setActiveButton(i);
+        buildHotspots(s);
         if (!hintDismissed) panoHint.classList.remove('hide');
       },
       function (xhr) {
@@ -221,6 +254,84 @@
       }
     );
   }
+
+  // ---------- Hotspots / waypoints ----------
+  let hotspots = [];
+
+  function clearHotspots() {
+    hotspots.forEach(function (h) { if (h.el && h.el.parentNode) h.el.parentNode.removeChild(h.el); });
+    hotspots = [];
+  }
+
+  function buildHotspots(s) {
+    (s.hotspots || []).forEach(function (hs) {
+      if (!(hs.to in byId)) return; // target not available → skip
+      const el = document.createElement('button');
+      el.className = 'hotspot';
+      el.innerHTML = '<span class="hs-ring"></span><span class="hs-label">' + availableScenes[byId[hs.to]].label + '</span>';
+      el.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        loadScene(byId[hs.to]);
+      });
+      viewer.appendChild(el);
+      hotspots.push({ el: el, lon: hs.lon, lat: hs.lat });
+    });
+  }
+
+  function dirToVector(lonDeg, latDeg) {
+    const phi = THREE.MathUtils.degToRad(90 - latDeg);
+    const theta = THREE.MathUtils.degToRad(lonDeg);
+    return new THREE.Vector3(
+      500 * Math.sin(phi) * Math.cos(theta),
+      500 * Math.cos(phi),
+      500 * Math.sin(phi) * Math.sin(theta)
+    );
+  }
+
+  function updateHotspots() {
+    const w = viewer.clientWidth, h = viewer.clientHeight;
+    hotspots.forEach(function (hsObj) {
+      const v = dirToVector(hsObj.lon, hsObj.lat);
+      const proj = v.project(camera);
+      const inFront = proj.z < 1;
+      if (!inFront || proj.x < -1.2 || proj.x > 1.2 || proj.y < -1.2 || proj.y > 1.2) {
+        hsObj.el.style.display = 'none';
+        return;
+      }
+      hsObj.el.style.display = '';
+      hsObj.el.style.left = ((proj.x * 0.5 + 0.5) * w) + 'px';
+      hsObj.el.style.top  = ((-proj.y * 0.5 + 0.5) * h) + 'px';
+    });
+  }
+
+  // ---------- Placement helper ----------
+  placeToggle.addEventListener('click', function () {
+    placementMode = !placementMode;
+    placeToggle.textContent = 'Placement: ' + (placementMode ? 'ON' : 'OFF');
+    placeToggle.classList.toggle('on', placementMode);
+    placeReadout.classList.toggle('hidden', !placementMode);
+  });
+
+  function captureClick(clientX, clientY) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera({ x: ndcX, y: ndcY }, camera);
+    const dir = ray.ray.direction.clone().normalize();
+    const latOut = Math.round(90 - THREE.MathUtils.radToDeg(Math.acos(dir.y)));
+    const lonOut = Math.round(THREE.MathUtils.radToDeg(Math.atan2(dir.z, dir.x)));
+    placeCoords.textContent = 'lon: ' + lonOut + ', lat: ' + latOut;
+    placeCoords.dataset.copy = '{ to: "TARGET_ID", lon: ' + lonOut + ', lat: ' + latOut + ' }';
+  }
+
+  placeCoords.addEventListener('click', function () {
+    const txt = this.dataset.copy || this.textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(txt);
+    const old = this.textContent, self = this;
+    this.textContent = 'Copied!';
+    setTimeout(function () { self.textContent = old; }, 900);
+  });
 
   // ---------- Panorama hint ----------
   function dismissHint() {
@@ -253,7 +364,7 @@
   function bindEvents() {
     const el = renderer.domElement;
     el.addEventListener('pointerdown', function (e) {
-      isDragging = true;
+      isDragging = true; didDrag = false;
       pointerX = e.clientX; pointerY = e.clientY;
       downLon = targetLon; downLat = targetLat;
       el.setPointerCapture(e.pointerId);
@@ -261,21 +372,24 @@
     });
     el.addEventListener('pointermove', function (e) {
       if (!isDragging) return;
+      if (Math.abs(e.clientX - pointerX) + Math.abs(e.clientY - pointerY) > 4) didDrag = true;
       targetLon = downLon - (e.clientX - pointerX) * 0.12 * (fov / 75);
       targetLat = downLat + (e.clientY - pointerY) * 0.12 * (fov / 75);
       targetLat = Math.max(-85, Math.min(85, targetLat));
     });
-    el.addEventListener('pointerup', function () { isDragging = false; });
+    el.addEventListener('pointerup', function (e) {
+      isDragging = false;
+      if (!didDrag && placementMode) captureClick(e.clientX, e.clientY);
+    });
     el.addEventListener('pointerleave', function () { isDragging = false; });
     el.addEventListener('wheel', function (e) {
       e.preventDefault();
       setFov(fov + e.deltaY * 0.05);
     }, { passive: false });
 
-    // ----- Touch: two-finger pinch zoom -----
+    // Touch: two-finger pinch zoom
     el.addEventListener('touchstart', function (e) {
       if (e.touches.length === 2) {
-        // begin pinch — suppress single-finger drag
         isDragging = false;
         pinchStartDist = touchDist(e.touches[0], e.touches[1]);
         pinchStartFov = fov;
@@ -284,16 +398,11 @@
 
     el.addEventListener('touchmove', function (e) {
       if (e.touches.length === 2) {
-        // pinch: scale fov by the change in finger distance
         e.preventDefault();
         const dist = touchDist(e.touches[0], e.touches[1]);
-        if (pinchStartDist > 0) {
-          const ratio = pinchStartDist / dist;       // fingers apart → ratio<1 → zoom in
-          setFov(pinchStartFov * ratio);
-        }
+        if (pinchStartDist > 0) setFov(pinchStartFov * (pinchStartDist / dist));
         dismissHint();
       } else {
-        // single-finger drag: keep page from scrolling
         e.preventDefault();
       }
     }, { passive: false });
@@ -332,6 +441,7 @@
       500 * Math.sin(phi) * Math.sin(theta)
     ));
     renderer.render(scene, camera);
+    updateHotspots();
   }
 
   init();
@@ -354,7 +464,6 @@
   #viewer:active { cursor: grabbing; }
   #viewer canvas { display: block; }
 
-  /* Logo: bottom-left */
   #logo { position: absolute; bottom: 20px; left: 24px; width: 160px; opacity: 0.85; display: block; z-index: 8; }
 
   /* Loader */
@@ -373,7 +482,32 @@
   #progress-wrap { width: 220px; height: 5px; border-radius: 999px; background: rgba(255,255,255,0.12); overflow: hidden; visibility: hidden; }
   #progress-bar { height: 100%; width: 0%; background: #C8102E; transition: width 0.15s; }
 
-  /* ---------- Navigation: red hamburger, no background, bottom-right ---------- */
+  /* Waypoint markers */
+  .hotspot {
+    position: absolute; transform: translate(-50%, -50%); z-index: 6;
+    background: none; border: none; cursor: pointer; padding: 0;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+  }
+  .hs-ring {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid #fff; background: rgba(200,16,46,0.55);
+    box-shadow: 0 0 0 4px rgba(0,0,0,0.22), 0 2px 10px rgba(0,0,0,0.4);
+    animation: hspulse 2s infinite;
+  }
+  .hotspot:hover .hs-ring { background: rgba(200,16,46,0.9); }
+  .hs-label {
+    font-size: 12px; font-weight: 600; color: #fff; white-space: nowrap;
+    background: rgba(20,24,29,0.8); padding: 3px 9px; border-radius: 999px;
+    opacity: 0; transition: opacity 0.15s; pointer-events: none;
+  }
+  .hotspot:hover .hs-label { opacity: 1; }
+  @keyframes hspulse {
+    0%   { box-shadow: 0 0 0 4px rgba(0,0,0,0.22), 0 0 0 0 rgba(200,16,46,0.5); }
+    70%  { box-shadow: 0 0 0 4px rgba(0,0,0,0.22), 0 0 0 14px rgba(200,16,46,0); }
+    100% { box-shadow: 0 0 0 4px rgba(0,0,0,0.22), 0 0 0 0 rgba(200,16,46,0); }
+  }
+
+  /* Navigation: red hamburger, bottom-right */
   #nav { position: absolute; bottom: 9px; right: 24px; left: auto; z-index: 8; }
   #menu-btn {
     display: flex; width: 46px; height: 46px;
@@ -384,8 +518,6 @@
     display: block; width: 26px; height: 3px; background: #C8102E; border-radius: 2px;
     transition: transform 0.25s, opacity 0.25s;
   }
-
-  /* Menu panel opens upward */
   #nav-panel {
     position: absolute; bottom: 56px; right: 0;
     width: 260px; max-height: 70vh; overflow-y: auto;
@@ -396,8 +528,6 @@
     pointer-events: none; transition: opacity 0.22s, transform 0.22s;
   }
   #nav.open #nav-panel { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
-
-  /* Hamburger morphs into an X when open */
   #nav.open #menu-btn span:nth-child(1) { transform: translateY(8px) rotate(45deg); }
   #nav.open #menu-btn span:nth-child(2) { opacity: 0; }
   #nav.open #menu-btn span:nth-child(3) { transform: translateY(-8px) rotate(-45deg); }
@@ -422,7 +552,26 @@
   }
   #nav-backdrop.show { opacity: 1; pointer-events: auto; }
 
-  /* ---------- Panorama gesture hint ---------- */
+  /* Placement helper */
+  #place-tools { position: absolute; bottom: 58px; left: 24px; z-index: 8; }
+  #place-toggle {
+    padding: 7px 12px; border-radius: 8px; cursor: pointer;
+    background: rgba(20,24,29,0.82); color: #aab2bd; font-size: 12px; font-weight: 600;
+    border: 1px solid rgba(255,255,255,0.1); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  }
+  #place-toggle.on { background: #C8102E; color: #fff; border-color: #C8102E; }
+  #place-readout {
+    margin-top: 8px; padding: 10px 12px; border-radius: 10px; max-width: 240px;
+    background: rgba(20,24,29,0.92); border: 1px solid rgba(255,255,255,0.1);
+  }
+  #place-coords {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: #fff;
+    cursor: pointer; padding: 4px 0;
+  }
+  #place-coords:hover { color: #ff6b81; }
+  #place-hint { font-size: 11px; color: #79828f; margin-top: 4px; line-height: 1.4; }
+
+  /* Panorama gesture hint */
   #pano-hint {
     position: absolute; inset: 0; z-index: 6;
     display: flex; align-items: center; justify-content: center;
@@ -435,7 +584,7 @@
   }
   .pano-hint-inner .hand {
     color: #fff;
-    transform-origin: 50% 80%;   /* pivot near the wrist for a natural tilt */
+    transform-origin: 50% 80%;
     animation: waveHand 2.6s ease-in-out infinite;
   }
   @keyframes waveHand {
@@ -447,7 +596,9 @@
     .pano-hint-inner .hand { animation: none; }
   }
 
-  /* ---------- Medium / small screens (tablets, laptops, phones) ---------- */
+  .hidden { display: none; }
+
+  /* Medium / small screens */
   @media (max-width: 1280px) {
     #nav { bottom: 8px; right: 14px; left: auto; }
     #menu-btn { width: 40px; height: 48px; gap: 4px; }
